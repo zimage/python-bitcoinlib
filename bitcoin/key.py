@@ -7,6 +7,8 @@
 
 import ctypes
 import ctypes.util
+from bitcoin.base58 import CBase58Data, CBitcoinAddress
+from bitcoin.serialize import Hash160, ser_uint160
 
 ssl = ctypes.cdll.LoadLibrary (ctypes.util.find_library ('ssl') or 'libeay32')
 
@@ -22,6 +24,9 @@ def check_result (val, func, args):
 
 ssl.EC_KEY_new_by_curve_name.restype = ctypes.c_void_p
 ssl.EC_KEY_new_by_curve_name.errcheck = check_result
+
+class CKeyForm:
+    HEX, BASE58 = range(2)
 
 class CKey:
 
@@ -61,17 +66,40 @@ class CKey:
         self.mb = ctypes.create_string_buffer(key)
         ssl.o2i_ECPublicKey(ctypes.byref(self.k), ctypes.byref(ctypes.pointer(self.mb)), len(key))
 
+    def get_compressed(self):
+        return True if ssl.EC_KEY_get_conv_form(self.k) == self.POINT_CONVERSION_COMPRESSED else False
+
     def get_privkey(self):
         size = ssl.i2d_ECPrivateKey(self.k, 0)
         mb_pri = ctypes.create_string_buffer(size)
         ssl.i2d_ECPrivateKey(self.k, ctypes.byref(ctypes.pointer(mb_pri)))
         return mb_pri.raw
 
-    def get_pubkey(self):
+    def get_pubkey(self, form = CKeyForm.HEX):
         size = ssl.i2o_ECPublicKey(self.k, 0)
         mb = ctypes.create_string_buffer(size)
         ssl.i2o_ECPublicKey(self.k, ctypes.byref(ctypes.pointer(mb)))
-        return mb.raw
+        if form is CKeyForm.HEX:
+            return mb.raw
+        elif form is CKeyForm.BASE58:
+            return str(CBase58Data(ser_uint160(Hash160(mb.raw)), CBitcoinAddress.PUBKEY_ADDRESS))
+        else:
+            raise ValueError("Unknown KeyForm.")
+
+    def get_secret(self, form = CKeyForm.HEX):
+        bn = ssl.EC_KEY_get0_private_key(self.k)
+        size = ((ssl.BN_num_bits(bn) + 7) / 8 )
+        mb = ctypes.create_string_buffer(size)
+        ssl.BN_bn2bin(bn, mb)
+        if form is CKeyForm.HEX:
+            return mb.raw
+        elif form is CKeyForm.BASE58:
+            if self.get_compressed() is True:
+                return str(CBase58Data(mb.raw+'\x01', CBitcoinAddress.PRIVKEY_ADDRESS))
+            else:
+                return str(CBase58Data(mb.raw, CBitcoinAddress.PRIVKEY_ADDRESS))
+        else:
+            raise ValueError("Unknown KeyForm.")
 
     def sign(self, hash):
         sig_size0 = ctypes.c_uint32()
