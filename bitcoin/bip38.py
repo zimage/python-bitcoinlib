@@ -10,6 +10,7 @@ from binascii import hexlify
 from struct import *
 import ctypes
 import ctypes.util
+import os
 
 ssl = ctypes.cdll.LoadLibrary (ctypes.util.find_library ('ssl') or 'libeay32')
 
@@ -25,7 +26,7 @@ class Bip38:
         pass
 
     def encrypt_no_ec_multiply(self):
-        address = str(CBase58Data(ser_uint160(Hash160(self.k.get_pubkey())), CBitcoinAddress.PUBKEY_ADDRESS))
+        address = self.k.get_pubkey(form = CKeyForm.BASE58)
 
         addresshash = SHA256.new(SHA256.new(address).digest()).digest()[:4]
 
@@ -53,44 +54,40 @@ class Bip38:
     def encrypt_ec_multiply(intermediate, seedb=None):
         i_buffer = CBase58Data.from_str(intermediate)
         ownerentropy = i_buffer[7:7+8]
-        passpoint = i_buffer[15:15+33]
+        passpoint_hex = i_buffer[15:15+33]
 
         flagbyte=array('B', [0])
         if i_buffer[6:7] == '\x51':
             flagbyte[0] |= 0x04
 
         if seedb is None:
-            # FIXME: make random
-            seedb = '\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+            seedb = os.urandom(24)
 
-        factorb = SHA256.new(SHA256.new(seedb).digest()).digest()
+        factorb_hex = SHA256.new(SHA256.new(seedb).digest()).digest()
 
         NID_secp256k1 = 714
         k = ssl.EC_KEY_new_by_curve_name(NID_secp256k1)
         group = ssl.EC_KEY_get0_group(k)
         pub_key = ssl.EC_POINT_new(group)
         ctx = ssl.BN_CTX_new()
-        point = ssl.EC_POINT_new(group)
-        ssl.EC_POINT_oct2point(group, point, passpoint, 33, ctx)
-        priv_key = ssl.BN_bin2bn(factorb, 32, ssl.BN_new())
-        ssl.EC_POINT_mul(group, pub_key, None, point, priv_key, ctx)
-        ssl.EC_KEY_set_public_key(k, pub_key)
-        size = ssl.i2o_ECPublicKey(k, 0)
-        mb = ctypes.create_string_buffer(size)
-        ssl.i2o_ECPublicKey(k, ctypes.byref(ctypes.pointer(mb)))
-        generatedaddress = ssl.EC_POINT_new(group)
-        ssl.EC_POINT_oct2point(group, generatedaddress, mb.raw, size, ctx)
+        passpoint = ssl.EC_POINT_new(group)
+        ssl.EC_POINT_oct2point(group, passpoint, passpoint_hex, 33, ctx)
+        factorb = ssl.BN_bin2bn(factorb_hex, 32, ssl.BN_new())
+        ssl.EC_POINT_mul(group, pub_key, None, passpoint, factorb, ctx)
+
+        # FIXME: set correct compression
         ssl.EC_KEY_set_public_key(k, pub_key)
         size = ssl.i2o_ECPublicKey(k, 0)
         mb = ctypes.create_string_buffer(size)
         ssl.i2o_ECPublicKey(k, ctypes.byref(ctypes.pointer(mb)))
        
-        generatedaddressbytes = CBase58Data(ser_uint160(Hash160(mb.raw)), CBitcoinAddress.PUBKEY_ADDRESS)
-        addresshash = SHA256.new(SHA256.new(generatedaddressbytes).digest()).digest()[:4]
- 
-        derived = scrypt.hash(passpoint, addresshash + ownerentropy, N=1024, r=1, p=1, buflen=64)
+        generatedaddress = str(CBase58Data(ser_uint160(Hash160(mb.raw)), CBitcoinAddress.PUBKEY_ADDRESS))
+
+        addresshash = SHA256.new(SHA256.new(generatedaddress).digest()).digest()[:4]
+        derived = scrypt.hash(passpoint_hex, addresshash + ownerentropy, N=1024, r=1, p=1, buflen=64)
         derived_half1 = derived[:32]
         derived_half2 = derived[32:64]
+        #confirmation = Bip38._get_confirmation_code(flagbyte, ownerentropy, factorb_hex, derived_half1, derived_half2, addresshash)
         cipher = AES.new(derived_half2)
         ep1 = cipher.encrypt(Bip38.xor_zip(seedb[:16], derived_half1[:16]))
         ep2 = cipher.encrypt(Bip38.xor_zip(ep1[8:16] + seedb[16:24], derived_half1[16:32]))
@@ -98,16 +95,36 @@ class Bip38:
         prefix = '\x43'
         return str(CBase58Data(prefix + flagbyte.tostring() + addresshash + ownerentropy + ep1[:8] + ep2, 0x01))
 
+    @staticmethod
+    def _get_confirmation_code(flagbyte, ownerentropy, factorb, derived_half1, derived_half2, addresshash):
+        k = CKey()
+        k.set_compressed(True)
+        k.generate(secret=factorb)
+        pointb = k.get_pubkey()
+        if len(pointb) != 33:
+            return AssertionError('pointb (' + hexlify(pointb) + ') is ' + str(len(pointb)) + ' bytes. It should be 33 bytes.')
+
+        if pointb[:1] != '\x02' and pointb[:1] != '\x03':
+            return ValueError('pointb is not correct.')
+
+	pointbprefix = Bip38.xor_zip(pointb[:1], chr(ord(derived_half2[31:32])&ord('\x01')))
+        cipher = AES.new(derived_half2)
+        pointbx1 = cipher.encrypt(Bip38.xor_zip(pointb[1:17], derived_half1[:16]))
+        pointbx2 = cipher.encrypt(Bip38.xor_zip(pointb[17:33], derived_half1[16:32]))
+        encryptedpointb = pointbprefix + pointbx1 + pointbx2
+        if len(encryptedpointb) != 33:
+            return AssertionError('encryptedpointb is not 33 bytes long.')
+        magic = '\x3b\xf6\xa8\x9a'
+        return str(CBase58Data(magic + flagbyte.tostring() + addresshash + ownerentropy + encryptedpointb, 0x64))
+
     def get_intermediate(self, salt=None, lot=0, sequence=0):
         if salt is None:
             if self.ls_numbers is True:
-                # FIXME: salt should be random 4bytes
-                salt = '\x00\x00\x00\x00'
+                salt = os.urandom(4)
                 ownerentropy = salt + pack('>I',(lot*4096)+sequence)
 
             else:
-                # FIXME: salt should be random 8bytes
-                salt = '\x00\x00\x00\x00\x00\x00\x00\x00'
+                salt = os.urandom(8)
                 ownerentropy = salt
         else:
             if self.ls_numbers is True:

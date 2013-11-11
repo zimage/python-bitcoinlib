@@ -86,7 +86,7 @@ class TestBip38(unittest.TestCase):
             self.assertEqual(v['passphrase_code'], b.get_intermediate(salt = v['salt']))
 
             # Test encryption
-            #self.assertEqual(v['encrypted'], Bip38.encrypt_ec_multiply(v['passphrase_code'], seedb=v['seedb']))
+            self.assertEqual(v['encrypted'], Bip38.encrypt_ec_multiply(v['passphrase_code'], seedb=v['seedb']))
 
             # Test decryption
             self.assertEqual(unhexlify(v['unencrypted_hex']), Bip38.decrypt(v['encrypted'], v['passphrase']))
@@ -131,7 +131,7 @@ class TestBip38(unittest.TestCase):
             self.assertEqual(v['passphrase_code'], b.get_intermediate(salt = v['salt'], lot=v['lot'], sequence=v['sequence']))
 
             # Test encryption
-            #self.assertEqual(v['encrypted'], b.encrypt_ec_multiply(v['passphrase_code'], seedb=v['seedb']))
+            self.assertEqual(v['encrypted'], b.encrypt_ec_multiply(v['passphrase_code'], seedb=v['seedb']))
 
             # Test decryption
             self.assertEqual(unhexlify(v['unencrypted_hex']), Bip38.decrypt(v['encrypted'], v['passphrase']))
